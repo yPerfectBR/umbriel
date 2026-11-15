@@ -1125,9 +1125,6 @@ namespace umbriel {
       std::vector<std::string> ignoredDevices;
       // Canonical PCI domain:bus:slot.function addresses.
       std::vector<std::string> ignoredPciAddresses;
-      // A [drm] table is present, even an empty one: Umbriel then opens GPUs itself (never through
-      // EGL device enumeration), so a GPU excluded later by a reload can be released completely.
-      bool declared = false;
 
       bool configured() const { return !ignoredDevices.empty() || !ignoredPciAddresses.empty(); }
       bool operator==(const Drm&) const = default;

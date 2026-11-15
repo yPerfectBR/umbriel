@@ -3774,21 +3774,6 @@ ignored_devices = ["/dev/dri/excluded/../card0"]
   CHECK_EQ(store.config().drm.ignoredDevices, std::vector<std::string>{"/dev/dri/excluded/../card0"});
 }
 
-UMBRIEL_TEST(drmTableIsDeclaredEvenWhenEmpty) {
-  const TempConfig file;
-  file.write("[general]\n");
-
-  ConfigStore& store = umbriel::configStore();
-  store.setRootPath(file.path(), true);
-  CHECK(store.reload().success);
-  CHECK(!store.config().drm.declared);
-
-  file.write("[drm]\n");
-  CHECK(store.reload().success);
-  CHECK(store.config().drm.declared);
-  CHECK(!store.config().drm.configured());
-}
-
 UMBRIEL_TEST(drmConfigurationRejectsUnsafeSelectors) {
   const TempConfig file;
   file.write(R"(
