@@ -999,8 +999,27 @@ namespace umbriel {
   void Server::handleConfigReload(const ConfigReloadResult& result) {
     if (result.success) {
       const bool systemKeymapChanged = refreshSystemKeymap();
-      if (result.change.drm) {
-        kLog.warn("DRM configuration changed; restart Umbriel to apply it");
+      if (result.change.drm && m_backendManager != nullptr) {
+        // A GPU leaving turns its outputs off first: wlroots leaves CRTCs lit when a DRM backend
+        // is destroyed, which would keep the GPU awake and the screen frozen on its last frame.
+        const bool applied = m_backendManager->applyDrmConfig(config().drm, [this](wlr_backend* backend) {
+          for (const auto& output : m_outputs) {
+            wlr_output* wlrOutput = output->wlr();
+            if (wlrOutput == nullptr || wlrOutput->backend != backend || !wlrOutput->enabled) {
+              continue;
+            }
+            wlr_output_state disabled{};
+            wlr_output_state_init(&disabled);
+            wlr_output_state_set_enabled(&disabled, false);
+            if (!wlr_output_commit_state(wlrOutput, &disabled)) {
+              kLog.warn("could not turn off {} before releasing its GPU", wlrOutput->name);
+            }
+            wlr_output_state_finish(&disabled);
+          }
+        });
+        if (applied) {
+          kLog.info("DRM configuration applied without a restart");
+        }
       }
       if (result.change.keybinds) {
         m_bindCooldowns.clear();

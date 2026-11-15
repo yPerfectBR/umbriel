@@ -323,6 +323,74 @@ namespace umbriel {
 #endif
     }
 
+    [[nodiscard]] bool applyDrmConfig(
+        [[maybe_unused]] const Config::Drm& next, [[maybe_unused]] const std::function<void(wlr_backend*)>& release
+    ) {
+#if UMBRIEL_HAS_NATIVE_DRM_POLICY
+      if (m_session == nullptr || m_backend == nullptr || !wlr_backend_is_multi(m_backend)) {
+        kLog.warn("DRM configuration changed without a native session; restart Umbriel to apply it");
+        return false;
+      }
+      if (next.ignoredDevices != m_config.ignoredDevices) {
+        // Path selectors are resolved to physical GPUs once, before any card is opened.
+        kLog.warn("drm.ignored_devices changed; restart Umbriel to apply it");
+        return false;
+      }
+      std::vector<DrmChild> children = drmChildren();
+      for (const DrmChild& child : children) {
+        if (child.primary
+            && drmExclusionMatch(child.identity, m_ignoredDevices, next.ignoredPciAddresses) != DrmExclusionMatch::None) {
+          kLog.warn("the primary GPU {} cannot be released while Umbriel runs; restart Umbriel to apply it",
+                    child.identity.node);
+          return false;
+        }
+      }
+      m_config.ignoredPciAddresses = next.ignoredPciAddresses;
+
+      for (const DrmChild& child : children) {
+        if (child.primary
+            || drmExclusionMatch(child.identity, m_ignoredDevices, m_config.ignoredPciAddresses)
+                == DrmExclusionMatch::None) {
+          continue;
+        }
+        kLog.info("releasing newly ignored GPU {}", child.identity.node);
+        release(child.backend);
+        // The multi-backend and the record listener drop it; wlroots closes the device file.
+        wlr_backend_destroy(child.backend);
+      }
+
+      auto candidates = enumerateDrmCards();
+      if (!candidates) {
+        return true;
+      }
+      // With nothing excluded, a parent gives the secondary GPU wlroots' multi-GPU copy path,
+      // exactly as a session started without exclusions has; its EGL device enumeration would
+      // otherwise reach a GPU that must stay closed.
+      wlr_backend* parent = nullptr;
+      if (!m_config.configured()) {
+        for (const DrmChild& child : drmChildren()) {
+          if (child.primary) {
+            parent = child.backend;
+          }
+        }
+      }
+      for (const DrmDeviceIdentity& candidate : *candidates) {
+        const bool active = std::ranges::any_of(drmChildren(), [&](const DrmChild& child) {
+          return sameDrmPhysicalDevice(child.identity, candidate);
+        });
+        if (active
+            || drmExclusionMatch(candidate, m_ignoredDevices, m_config.ignoredPciAddresses) != DrmExclusionMatch::None) {
+          continue;
+        }
+        kLog.info("opening newly allowed GPU {}", candidate.node);
+        openCandidate(candidate, parent, true);
+      }
+      return true;
+#else
+      return false;
+#endif
+    }
+
   private:
     wl_display* m_display = nullptr;
     Config::Drm m_config;
@@ -331,6 +399,43 @@ namespace umbriel {
     wlr_session* m_session = nullptr;
 
 #if UMBRIEL_HAS_NATIVE_DRM_POLICY
+    struct DrmChild {
+      wlr_backend* backend = nullptr;
+      DrmDeviceIdentity identity;
+      bool primary = false;
+    };
+
+    // The DRM backends in the multi-backend, from either startup path. The primary is the one the
+    // compositor renders on: the filtered path records it, autocreate gives secondaries a parent.
+    std::vector<DrmChild> drmChildren() const {
+      std::vector<wlr_backend*> backends;
+      wlr_multi_for_each_backend(
+          m_backend,
+          [](wlr_backend* candidate, void* data) {
+            if (wlr_backend_is_drm(candidate)) {
+              static_cast<std::vector<wlr_backend*>*>(data)->push_back(candidate);
+            }
+          },
+          &backends
+      );
+      std::vector<DrmChild> children;
+      for (wlr_backend* backend : backends) {
+        const int fd = wlr_backend_get_drm_fd(backend);
+        struct stat statBuffer{};
+        if (fd < 0 || fstat(fd, &statBuffer) != 0 || !S_ISCHR(statBuffer.st_mode)) {
+          continue;
+        }
+        auto identity = identityFromDevnum(m_session->udev, statBuffer.st_rdev);
+        if (!identity) {
+          continue;
+        }
+        const bool primary =
+            m_primary != nullptr ? backend == m_primary : wlr_drm_backend_get_parent(backend) == nullptr;
+        children.push_back({backend, std::move(*identity), primary});
+      }
+      return children;
+    }
+
     struct DrmBackendRecord {
       Impl* owner = nullptr;
       wlr_backend* backend = nullptr;
@@ -572,7 +677,9 @@ namespace umbriel {
       return true;
     }
 
-    void openCandidate(const DrmDeviceIdentity& candidate) {
+    // `secondary` forces the secondary role (a live config change on a running session); `parent`
+    // is passed to wlroots for its multi-GPU copy path.
+    void openCandidate(const DrmDeviceIdentity& candidate, wlr_backend* parent = nullptr, bool secondary = false) {
       struct stat preOpenStat{};
       if (stat(candidate.node.c_str(), &preOpenStat) != 0 || !S_ISCHR(preOpenStat.st_mode)) {
         kLog.warn("allowed DRM card {} disappeared before open", candidate.node);
@@ -620,11 +727,12 @@ namespace umbriel {
         return;
       }
 
-      const bool primary = m_primary == nullptr;
+      const bool primary = !secondary && m_primary == nullptr;
       // A parent makes wlroots create an internal multi-GPU renderer through
       // EGL device enumeration. Independent backends keep exclusions strict;
       // secondary outputs import the compositor's DMA-BUFs directly instead.
-      wlr_backend* drm = wlr_drm_backend_create(m_session, device, nullptr);
+      // Only a live change with nothing excluded passes one.
+      wlr_backend* drm = wlr_drm_backend_create(m_session, device, parent);
       if (drm == nullptr) {
         closeDeviceIfOwned(device);
         kLog.warn("failed to create a DRM backend for {}", identity->node);
@@ -906,5 +1014,8 @@ namespace umbriel {
   }
   bool BackendManager::verifyOpenDevices(std::string_view context) { return m_impl->verifyOpenDevices(context); }
   void BackendManager::markStarted() { m_impl->markStarted(); }
+  bool BackendManager::applyDrmConfig(const Config::Drm& config, const std::function<void(wlr_backend*)>& release) {
+    return m_impl->applyDrmConfig(config, release);
+  }
 
 } // namespace umbriel
