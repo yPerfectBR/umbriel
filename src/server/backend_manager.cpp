@@ -236,7 +236,9 @@ namespace umbriel {
           std::getenv("WAYLAND_DISPLAY") != nullptr, std::getenv("WAYLAND_SOCKET") != nullptr,
           std::getenv("DISPLAY") != nullptr
       );
-      m_policyActive = m_config.configured() && environment.native;
+      // A declared but empty [drm] still takes the filtered path: wlroots' autocreate renderer
+      // enumerates EGL devices, and the NVIDIA EGL driver it loads keeps the dGPU open for good.
+      m_policyActive = (m_config.configured() || m_config.declared) && environment.native;
       if (m_config.configured() && !environment.native) {
         kLog.info("configuration is inactive because the selected backend is nested or headless");
       }
@@ -498,7 +500,9 @@ namespace umbriel {
             continue;
           }
           anyAllowed = true;
-          openCandidate(candidate);
+          // With nothing excluded, secondaries take wlroots' multi-GPU copy path, as in an
+          // autocreated session and as a GPU opened later by a reload.
+          openCandidate(candidate, m_config.configured() ? nullptr : m_primary);
         }
         if (!anyAllowed) {
           kLog.error("all DRM cards on seat {} are excluded", m_session->seat);

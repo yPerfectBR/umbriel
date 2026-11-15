@@ -111,6 +111,7 @@ namespace umbriel {
         errorAt(node->source(), "drm must be a table");
         return;
       }
+      loaded.drm.declared = true;
 
       for (const auto& [key, value] : *table) {
         if (key == "ignored_devices") {
