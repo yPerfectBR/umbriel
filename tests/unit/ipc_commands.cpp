@@ -3,7 +3,9 @@
 #include "check.h"
 #include "config/keybind_parse.h"
 #include "server/action_request.h"
+#include "server/color_description.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -60,6 +62,12 @@ namespace {
         {"transfer_function", "none"},
         {"primaries", "none"},
         {"sdr_white", 203.0},
+        {"sdr_transfer", "gamma22"},
+        {"color_profile", "none"},
+        {"sdr_gamut", "native"},
+        {"sdr_gamut_staged", false},
+        {"panel_primaries", nullptr},
+        {"panel_transfer", nullptr},
         {"bit_depth", 8},
         {"bit_depth_active", false},
         {"bit_depth_fallback_reason", ""},
@@ -85,6 +93,34 @@ namespace {
   }
 
 } // namespace
+
+UMBRIEL_TEST(globalShortcutHumanOutputShowsConflictsAndEscapesRequesterText) {
+  const auto* spec = umbriel::findIpcCommand("global-shortcuts");
+  CHECK(spec != nullptr && spec->printHuman != nullptr);
+  if (spec == nullptr || spec->printHuman == nullptr) {
+    return;
+  }
+  const auto applications = nlohmann::json::array(
+      {{{"application", "unverified\n\x1B[31m"},
+        {"live", true},
+        {"shortcuts",
+         nlohmann::json::array(
+             {{{"id", "talk\t"},
+               {"description", "Description\n\x1B[0m"},
+               {"session", 42},
+               {"pending", true},
+               {"trigger", nullptr},
+               {"candidate", "Ctrl+M"},
+               {"source", "stored"},
+               {"conflict", "in_use"}}}
+         )}}}
+  );
+  const auto text = captureHumanOutput(*spec, applications);
+  CHECK(text.contains("Ctrl+M") && text.contains("stored") && text.contains("in_use") && text.contains("42"));
+  CHECK(text.contains("\\n") && text.contains("\\t"));
+  CHECK(!text.contains('\x1B'));
+  CHECK_EQ(std::ranges::count(text, '\n'), std::ptrdiff_t{3});
+}
 
 UMBRIEL_TEST(keyboardLayoutsHumanOutputListsAndMarksCurrentLayout) {
   const umbriel::IpcCommandSpec* spec = umbriel::findIpcCommand("keyboard-layouts");
@@ -186,6 +222,61 @@ UMBRIEL_TEST(colorHumanShowsCommittedHdrOutputMetadata) {
       })
   );
   CHECK(out.contains("output metadata: 0.005 to 400 cd/m2; MaxCLL: 400; MaxFALL: 200"));
+}
+
+UMBRIEL_TEST(colorHumanReportsCharacterizationFields) {
+  const umbriel::IpcCommandSpec* spec = umbriel::findIpcCommand("color");
+  CHECK(spec != nullptr && spec->printHuman != nullptr);
+  if (spec == nullptr || spec->printHuman == nullptr) {
+    return;
+  }
+
+  const std::string inert = captureHumanOutput(*spec, colorPayload(nlohmann::json::object()));
+  CHECK(inert.contains("color profile: none (resolved none), SDR gamut: native, mapping staged: no"));
+  CHECK(inert.contains("panel primaries: none; panel transfer: none"));
+
+  const std::string characterized = captureHumanOutput(
+      *spec,
+      colorPayload({
+          {"color_profile", "edid"},
+          {"sdr_gamut", "srgb"},
+          {"sdr_gamut_staged", true},
+          {"panel_primaries",
+           {
+               {"red", {{"x", 0.68}, {"y", 0.32}}},
+               {"green", {{"x", 0.265}, {"y", 0.69}}},
+               {"blue", {{"x", 0.15}, {"y", 0.06}}},
+               {"white", {{"x", 0.3127}, {"y", 0.329}}},
+           }},
+          {"panel_transfer", "gamma22"},
+      })
+  );
+  CHECK(characterized.contains("color profile: edid (resolved edid), SDR gamut: srgb, mapping staged: yes"));
+  CHECK(characterized.contains(
+      "panel primaries: r 0.6800,0.3200 g 0.2650,0.6900 b 0.1500,0.0600 w 0.3127,0.3290; panel transfer: gamma22"
+  ));
+
+  // A configured profile that fell back to EDID reports both sources.
+  const std::string fellBack = captureHumanOutput(
+      *spec,
+      colorPayload(
+          {{"color_profile", "/profiles/factory.icc"}, {"color_profile_resolved", "edid"}, {"sdr_gamut", "srgb"}}
+      )
+  );
+  CHECK(fellBack.contains("color profile: /profiles/factory.icc (resolved edid), SDR gamut: srgb, mapping staged: no"));
+}
+
+UMBRIEL_TEST(surfaceTransferLabelSeparatesNamedAndBare) {
+  CHECK(umbriel::surfaceTransferLabel(nullptr) == "none");
+  umbriel::ColorDescription named{};
+  named.data.tf_named = WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22;
+  CHECK(umbriel::surfaceTransferLabel(&named) == "gamma 2.2");
+  // An output description's panel power curve has no named protocol value.
+  umbriel::ColorDescription powered{};
+  powered.tfPower = 1.8F;
+  CHECK(umbriel::surfaceTransferLabel(&powered) == "power 1.8");
+  umbriel::ColorDescription bare{};
+  CHECK(umbriel::surfaceTransferLabel(&bare) == "unspecified");
 }
 
 namespace {

@@ -337,8 +337,12 @@ namespace umbriel {
   void Workspace::setFocusedView(View* view, bool raise, bool settleLayers) {
     if (view == nullptr || view->workspace() == this) {
       if (m_focusedView != view) {
+        View* previous = m_focusedView;
         m_focusedView = view;
         m_group->server()->scheduleIpcWorkspacesEvent();
+        if (previous != nullptr && previous->workspace() == this) {
+          previous->syncTransientSceneParent();
+        }
       }
       if (view == nullptr) {
         m_floatingLayerActive = false;
@@ -387,6 +391,25 @@ namespace umbriel {
     return m_floatingLayer != nullptr && m_floatingLayer->node.parent == m_fullscreenTree;
   }
 
+  bool Workspace::liftedAboveFullscreen(const View* view) const {
+    if (view != m_focusedView || !view->tiled() || view->scheduledFullscreen()) {
+      return false;
+    }
+    if (std::ranges::any_of(m_views, [](const View* member) {
+          return member->mapped() && member->floating() && !member->pinned() && member->scheduledFullscreen();
+        })) {
+      return true;
+    }
+    if (m_layoutMode != LayoutMode::Scrolling) {
+      return false;
+    }
+    const int column = m_layout->columnOf(view);
+    return column >= 0
+        && std::ranges::any_of(m_layout->columns()[static_cast<size_t>(column)].views, [](const View* member) {
+             return member->mapped() && member->scheduledFullscreen();
+           });
+  }
+
   void Workspace::syncFloatingLayer() {
     if (m_floatingLayerActive && std::ranges::none_of(m_views, [](const View* view) {
           return view->mapped() && view->floating() && !view->pinned() && !view->scheduledFullscreen();
@@ -413,11 +436,16 @@ namespace umbriel {
 
   void Workspace::restackFloatingViews() {
     syncFloatingLayer();
+    std::vector<View*> raised;
     for (View* view : m_floatingStack) {
       if (view != nullptr && view->workspace() == this && view->floating()) {
-        view->raiseToTop();
+        raised.push_back(view);
       }
     }
+    if (m_focusedView != nullptr && liftedAboveFullscreen(m_focusedView)) {
+      raised.push_back(m_focusedView);
+    }
+    View::raiseInOrder(raised);
     raiseFloatingLayer();
   }
 
@@ -655,6 +683,15 @@ namespace umbriel {
     if (TabbedContainers* containers = m_layout->tabbedContainers();
         containers != nullptr && origin == LayoutAttachOrigin::OpeningView && view->m_ruleColumnDisplay) {
       containers->setTabbed(view, *view->m_ruleColumnDisplay == ColumnDisplay::Tabbed);
+    }
+
+    if (m_layoutMode == LayoutMode::Master || m_layoutMode == LayoutMode::Dwindle) {
+      // These layouts share the output between tiles, so an existing edge maximize would cover the joining tile.
+      for (View* other : m_views) {
+        if (other != view && other->tiled() && other->maximizedToEdges()) {
+          other->setMaximizedToEdges(false);
+        }
+      }
     }
 
     if (scrolling != nullptr && !placement) {
@@ -1001,6 +1038,10 @@ namespace umbriel {
       }
     } heldRelease{*this};
     refreshAloneRuleStates();
+    // Column membership and floating fullscreen windows determine whether the focused tile is lifted.
+    if (m_focusedView != nullptr) {
+      m_focusedView->syncTransientSceneParent();
+    }
     // Layout math and client configures must run even for hidden workspaces: clients (games especially) change
     // fullscreen state while another workspace is active, and skipping the configure here leaves them with a stale size
     // (fullscreen at tile size, windowed at output size, ...).
@@ -2439,6 +2480,7 @@ namespace umbriel {
     if (!target->pinned()
         && !target->scheduledFullscreen()
         && !(target->floating() && floatingLayerRaised())
+        && !liftedAboveFullscreen(target)
         && m_group != nullptr
         && m_group->output() != nullptr) {
       const wlr_box outputBox = m_group->output()->layoutBox();
@@ -3788,6 +3830,7 @@ namespace umbriel {
     activate(selected);
     m_server->cursor()->clearConstraint();
     m_server->refocus(m_output);
+    m_server->cursor()->refocusAfterSceneChange();
   }
 
   void WorkspaceGroup::deactivate(Workspace* workspace) {

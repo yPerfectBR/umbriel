@@ -5,6 +5,7 @@
 #include "wlr.h"
 
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -317,6 +318,10 @@ namespace umbriel {
 #endif
     }
 
+    void setDrmBackendRemovedHandler(std::function<void(const wlr_backend*)> handler) {
+      m_drmBackendRemoved = std::move(handler);
+    }
+
     void markStarted() {
 #if UMBRIEL_HAS_NATIVE_DRM_POLICY
       m_started = true;
@@ -397,6 +402,7 @@ namespace umbriel {
     bool m_policyActive = false;
     wlr_backend* m_backend = nullptr;
     wlr_session* m_session = nullptr;
+    std::function<void(const wlr_backend*)> m_drmBackendRemoved;
 
 #if UMBRIEL_HAS_NATIVE_DRM_POLICY
     struct DrmChild {
@@ -958,7 +964,8 @@ namespace umbriel {
       DrmBackendRecord* record;
       record = wl_container_of(listener, record, destroy);
       Impl* self = record->owner;
-      const bool primary = record->backend == self->m_primary;
+      const wlr_backend* backend = record->backend;
+      const bool primary = backend == self->m_primary;
       disconnectListener(record->destroy);
       if (primary) {
         self->m_primary = nullptr;
@@ -973,6 +980,9 @@ namespace umbriel {
         wl_display_terminate(self->m_display);
       } else if (!primary && !self->m_destroying) {
         kLog.info("secondary DRM backend was removed");
+      }
+      if (!self->m_destroying && self->m_drmBackendRemoved) {
+        self->m_drmBackendRemoved(backend);
       }
     }
 
@@ -1016,6 +1026,10 @@ namespace umbriel {
   void BackendManager::markStarted() { m_impl->markStarted(); }
   bool BackendManager::applyDrmConfig(const Config::Drm& config, const std::function<void(wlr_backend*)>& release) {
     return m_impl->applyDrmConfig(config, release);
+  }
+
+  void BackendManager::setDrmBackendRemovedHandler(std::function<void(const wlr_backend*)> handler) {
+    m_impl->setDrmBackendRemovedHandler(std::move(handler));
   }
 
 } // namespace umbriel

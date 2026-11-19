@@ -126,6 +126,14 @@ pangocairo_dep = dependency('pangocairo')
 libdrm_dep = dependency('libdrm', version: '>=2.4.129')
 libdisplay_info_dep = dependency('libdisplay-info', version: '>=0.3.0')
 libudev_dep = dependency('libudev', required: false)
+# Optional ICC support: this single lookup feeds both the output characterization
+# and umbrielfx's client-ICC evaluation, so -Dlcms2=disabled builds an lcms2-free
+# tree in which both compile their inert fallbacks.
+lcms2_dep = dependency('lcms2', required: get_option('lcms2'))
+add_project_arguments(
+  '-DUMBRIEL_HAS_LCMS2=' + lcms2_dep.found().to_int().to_string(),
+  language: ['c', 'cpp'],
+)
 # sd-bus reads the systemd-localed keymap a keyboard without XKB config uses.
 libsystemd_dep = dependency('libsystemd', version: '>=243', required: get_option('localed'))
 xcb_dep = dependency('xcb')
@@ -162,6 +170,25 @@ input_capture_protocol_c = custom_target(
   'umbriel-input-capture-v1-protocol.c',
   input: 'protocols/umbriel-input-capture-v1.xml',
   output: 'umbriel-input-capture-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
+global_shortcuts_server_h = custom_target(
+  'umbriel-global-shortcuts-v1-server-protocol.h',
+  input: 'protocols/umbriel-global-shortcuts-v1.xml',
+  output: 'umbriel-global-shortcuts-v1-server-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+global_shortcuts_client_h = custom_target(
+  'umbriel-global-shortcuts-v1-client-protocol.h',
+  input: 'protocols/umbriel-global-shortcuts-v1.xml',
+  output: 'umbriel-global-shortcuts-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+global_shortcuts_protocol_c = custom_target(
+  'umbriel-global-shortcuts-v1-protocol.c',
+  input: 'protocols/umbriel-global-shortcuts-v1.xml',
+  output: 'umbriel-global-shortcuts-v1-protocol.c',
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
@@ -708,6 +735,7 @@ pure_sources = files(
   'src/input/surface_layouts.cpp',
   'src/input/shortcuts_inhibit.cpp',
   'src/input/shortcut_keysym.cpp',
+  'src/input/global_shortcut_trigger.cpp',
   'src/input/xcursor_matcher.cpp',
   'src/layout/layout.cpp',
   'src/scene/ssd_frame_geometry.cpp',
@@ -767,6 +795,7 @@ core_sources = files(
   'src/scene/effect_registry.cpp',
   'src/core/fdlimit.cpp',
   'src/core/log.cpp',
+  'src/core/private_state_file.cpp',
   'src/config/config.cpp',
   'src/config/fields.cpp',
   'src/config/fields_animation.cpp',
@@ -780,6 +809,7 @@ core_sources = files(
   'src/config/fields_rules.cpp',
   'src/config/store.cpp',
   'src/config/config_merge.cpp',
+  'src/config/overrides.cpp',
   'src/config/config_watcher.cpp',
   'src/config/schema.cpp',
   'src/layout/drop_target.cpp',
@@ -799,6 +829,7 @@ core_sources = files(
   'src/server/effects.cpp',
   'src/output/output.cpp',
   'src/output/hdr_metadata.cpp',
+  'src/output/colorimetry.cpp',
   'src/input/seat.cpp',
   'src/input/toplevel_drag.cpp',
   'src/input/keyboard.cpp',
@@ -818,6 +849,11 @@ core_sources = files(
   'src/input/eis.cpp',
   'src/input/input_capture.cpp',
   'src/input/input_capture_permissions.cpp',
+  'src/input/global_shortcuts.cpp',
+  'src/input/global_shortcuts_bridge.cpp',
+  'src/input/global_shortcuts_controller.cpp',
+  'src/input/global_shortcuts_input.cpp',
+  'src/input/global_shortcuts_store.cpp',
   'src/input/eis_socket.cpp',
   'src/xwayland/window.cpp',
   'src/xwayland/unmanaged.cpp',
@@ -846,6 +882,7 @@ core_sources = files(
   'src/scene/quit_confirm.cpp',
   'src/scene/cheatsheet.cpp',
   'src/scene/text_buffer.cpp',
+  'src/scene/shortcut_approval.cpp',
   'src/scene/cairo_buffer.cpp',
   'src/scene/title_bar_icon.cpp',
   'src/scene/tab_bar.cpp',
@@ -863,6 +900,14 @@ core_sources = files(
   'src/server/ipc.cpp',
   'src/server/ipc_commands.cpp',
 )
+
+# The ICC characterization unit has two shapes: lcms2 parsing, or an inert
+# fallback that reports "ICC unsupported" (mirroring umbrielfx's color_fallback).
+if lcms2_dep.found()
+  core_sources += files('src/output/colorimetry_icc_lcms2.cpp')
+else
+  core_sources += files('src/output/colorimetry_icc_fallback.cpp')
+endif
 
 umbriel_core_deps = [
   libeis_dep,
@@ -889,12 +934,17 @@ umbriel_core_deps = [
   xcb_shape_dep,
   xcb_randr_dep,
 ]
+if lcms2_dep.found()
+  umbriel_core_deps += lcms2_dep
+endif
 
 umbriel_core = static_library(
   'umbriel-core',
   core_sources + [
     input_capture_server_h,
     input_capture_protocol_c,
+    global_shortcuts_server_h,
+    global_shortcuts_protocol_c,
     toplevel_drag_server_h,
     toplevel_drag_c,
     xdg_shell_client_c,

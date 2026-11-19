@@ -33,6 +33,7 @@ namespace umbriel {
     // each of their backends (to turn their outputs off). Returns false when the change needs a
     // restart (path selectors changed, the primary GPU would be excluded, or no native session).
     [[nodiscard]] bool applyDrmConfig(const Config::Drm& config, const std::function<void(wlr_backend*)>& release);
+    void setDrmBackendRemovedHandler(std::function<void(const wlr_backend*)> handler);
 
   private:
     class Impl;

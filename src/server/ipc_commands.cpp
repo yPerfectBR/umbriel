@@ -2,7 +2,10 @@
 
 #include "config/change.h"
 #include "config/config.h"
+#include "config/overrides.h"
+#include "config/store.h"
 #include "input/cursor.h"
+#include "input/global_shortcuts_controller.h"
 #include "input/input_capture.h"
 #include "layer/layer_surface.h"
 #include "output/identity.h"
@@ -10,6 +13,7 @@
 #include "scene/effect_registry.h"
 #include "scene/effect_selection.h"
 #include "server/action_request.h"
+#include "server/color_description.h"
 #include "server/focus.h"
 #include "server/ipc.h"
 #include "server/server.h"
@@ -35,6 +39,108 @@ extern "C" {
 }
 
 namespace umbriel {
+
+  namespace {
+    std::string_view shortcutSourceName(GlobalShortcutSource source) {
+      switch (source) {
+      case GlobalShortcutSource::None:
+        return "none";
+      case GlobalShortcutSource::Config:
+        return "config";
+      case GlobalShortcutSource::Stored:
+        return "stored";
+      case GlobalShortcutSource::Preferred:
+        return "preferred";
+      }
+      std::unreachable();
+    }
+
+    std::string_view shortcutConflictName(GlobalShortcutConflict conflict) {
+      switch (conflict) {
+      case GlobalShortcutConflict::None:
+        return "none";
+      case GlobalShortcutConflict::Unassigned:
+        return "unassigned";
+      case GlobalShortcutConflict::Disabled:
+        return "disabled";
+      case GlobalShortcutConflict::Reserved:
+        return "reserved";
+      case GlobalShortcutConflict::InUse:
+        return "in_use";
+      }
+      std::unreachable();
+    }
+
+    nlohmann::json shortcutTriggerJson(const std::optional<GlobalShortcutTrigger>& trigger) {
+      return trigger ? nlohmann::json(describeGlobalShortcutTrigger(*trigger)) : nlohmann::json(nullptr);
+    }
+
+    void printGlobalShortcuts(const nlohmann::json& applications) {
+      for (const auto& application : applications) {
+        std::println(
+            "{} ({})", application["application"].dump(-1, ' ', true),
+            application["live"].get<bool>() ? "live" : "remembered"
+        );
+        for (const auto& shortcut : application["shortcuts"]) {
+          std::println(
+              "  {}: {} (candidate {}, {}, {}; session {}, pending {})", shortcut["id"].dump(-1, ' ', true),
+              shortcut["trigger"].is_null() ? "-" : shortcut["trigger"].get<std::string>(),
+              shortcut["candidate"].is_null() ? "-" : shortcut["candidate"].get<std::string>(),
+              shortcut["source"].get<std::string>(), shortcut["conflict"].get<std::string>(),
+              shortcut["session"].is_null() ? "none" : shortcut["session"].dump(), shortcut["pending"].get<bool>()
+          );
+          std::println("    {}", shortcut["description"].dump(-1, ' ', true));
+        }
+      }
+    }
+  } // namespace
+
+  nlohmann::json IpcCommands::globalShortcuts(Server& server, IpcArgs args) {
+    if (!args.empty()) {
+      return nlohmann::json{{"err", "usage: global-shortcuts"}};
+    }
+    auto applications = nlohmann::json::array();
+    if (auto* shortcuts = server.globalShortcuts()) {
+      const auto inspected = shortcuts->inspect();
+      if (!inspected) {
+        return nlohmann::json{{"err", "unable to read global shortcut state"}};
+      }
+      for (const auto& application : *inspected) {
+        auto entries = nlohmann::json::array();
+        for (const auto& entry : application.shortcuts) {
+          const auto& shortcut = entry.shortcut;
+          entries.push_back(
+              {{"id", shortcut.id},
+               {"description", shortcut.description},
+               {"trigger", shortcutTriggerJson(shortcut.trigger)},
+               {"candidate", shortcutTriggerJson(shortcut.candidate)},
+               {"source", shortcutSourceName(shortcut.source)},
+               {"conflict", shortcutConflictName(shortcut.conflict)},
+               {"session", entry.session ? nlohmann::json(*entry.session) : nlohmann::json(nullptr)},
+               {"pending", entry.pending}}
+          );
+        }
+        applications.push_back(
+            {{"application", application.application}, {"live", application.live}, {"shortcuts", std::move(entries)}}
+        );
+      }
+    }
+    return nlohmann::json{{"ok", std::move(applications)}};
+  }
+
+  nlohmann::json IpcCommands::globalShortcutsRevoke(Server& server, IpcArgs args) {
+    if (args.size() != 1 || !validGlobalShortcutId(args.front())) {
+      return nlohmann::json{{"err", "usage: global-shortcuts-revoke <application|all>"}};
+    }
+    auto* shortcuts = server.globalShortcuts();
+    if (shortcuts == nullptr) {
+      return nlohmann::json{{"err", "global shortcuts unavailable"}};
+    }
+    if (!shortcuts->revoke(args.front())) {
+      return nlohmann::json{{"err", "unable to save global shortcut revocation; matching live sessions were stopped"}};
+    }
+    return nlohmann::json{{"ok", true}};
+  }
 
   nlohmann::json IpcCommands::inputCapturePermissions(Server& server, IpcArgs /*args*/) {
     auto result = nlohmann::json::array();
@@ -253,6 +359,16 @@ namespace umbriel {
 
     void printOutputName(const nlohmann::json& ok) { std::println("{}", ok.get<std::string>()); }
 
+    // A string prints bare, so `config get` output feeds shell scripts; anything else prints as JSON.
+    void printConfigValue(const nlohmann::json& ok) {
+      const nlohmann::json& value = ok["value"];
+      if (value.is_string()) {
+        std::println("{}", value.get<std::string>());
+      } else {
+        std::println("{}", value.dump());
+      }
+    }
+
     const char* transformName(wl_output_transform transform) {
       switch (transform) {
       case WL_OUTPUT_TRANSFORM_NORMAL:
@@ -400,6 +516,18 @@ namespace umbriel {
       return "unknown";
     }
 
+    const char* panelTransferName(const PanelTransfer& transfer) {
+      switch (transfer.kind) {
+      case PanelTransfer::Kind::Srgb:
+        return "srgb";
+      case PanelTransfer::Kind::Gamma22:
+        return "gamma22";
+      case PanelTransfer::Kind::Curve:
+        return "curve";
+      }
+      return "unknown";
+    }
+
     const char* protocolTransferFunctionName(uint32_t value) {
       switch (value) {
       case 0:
@@ -529,6 +657,34 @@ namespace umbriel {
 
         if (!fallback.empty()) {
           std::println("  fallback: {}", fallback);
+        }
+
+        const std::string configuredProfile = output.value("color_profile", "none");
+        const std::string resolvedProfile = output.value("color_profile_resolved", configuredProfile);
+        std::println(
+            "  color profile: {} (resolved {}), SDR gamut: {}, mapping staged: {}", configuredProfile, resolvedProfile,
+            output.value("sdr_gamut", "native"), output.value("sdr_gamut_staged", false) ? "yes" : "no"
+        );
+        // A daemon that predates the characterization fields omits these keys,
+        // so the printer degrades to the inert wording instead of throwing.
+        const auto panelPrimaries = output.find("panel_primaries");
+        const auto panelTransferValue = output.find("panel_transfer");
+        const std::string panelTransfer = panelTransferValue != output.end() && panelTransferValue->is_string()
+            ? panelTransferValue->get<std::string>()
+            : "none";
+        if (panelPrimaries != output.end() && panelPrimaries->is_object()) {
+          const auto& red = panelPrimaries->at("red");
+          const auto& green = panelPrimaries->at("green");
+          const auto& blue = panelPrimaries->at("blue");
+          const auto& white = panelPrimaries->at("white");
+          std::println(
+              "  panel primaries: r {:.4f},{:.4f} g {:.4f},{:.4f} b {:.4f},{:.4f} w {:.4f},{:.4f}; panel transfer: {}",
+              red.at("x").get<double>(), red.at("y").get<double>(), green.at("x").get<double>(),
+              green.at("y").get<double>(), blue.at("x").get<double>(), blue.at("y").get<double>(),
+              white.at("x").get<double>(), white.at("y").get<double>(), panelTransfer
+          );
+        } else {
+          std::println("  panel primaries: none; panel transfer: {}", panelTransfer);
         }
 
         const int configuredDepth = output.value("bit_depth", 8);
@@ -724,6 +880,22 @@ namespace umbriel {
 
   } // namespace
 
+  // Surface transfer label: the named protocol curve, a power exponent for an
+  // output description's tf_power, "unspecified" for a description without a
+  // curve, and "none" for no description at all.
+  std::string surfaceTransferLabel(const ColorDescription* description) {
+    if (description == nullptr) {
+      return "none";
+    }
+    if (description->data.tf_named != 0) {
+      return protocolTransferFunctionName(description->data.tf_named);
+    }
+    if (description->tfPower > 0.0F) {
+      return std::format("power {:.4g}", description->tfPower);
+    }
+    return "unspecified";
+  }
+
   nlohmann::json IpcCommands::windows(Server& server, IpcArgs /*args*/) {
     nlohmann::json windows = nlohmann::json::array();
     PendingLayouts pendingLayouts;
@@ -831,6 +1003,7 @@ namespace umbriel {
             {"index", workspace->index() + 1},
             {"output", output->wlr()->name},
             {"active", workspace->active()},
+            {"previous", workspace == group->previous()},
             {"focused", output.get() == preferred && workspace->active()},
             {"occupied", workspace->occupied()},
             {"window_count",
@@ -988,6 +1161,7 @@ namespace umbriel {
       const wlr_output* wlrOutput = output->wlr();
       const wlr_output_image_description* description = wlrOutput->image_description;
       const bool hdrRequested = output->hdrRequested();
+      const PanelColorimetry* panel = output->panelColorimetry();
       nlohmann::json entry = {
           {"name", wlrOutput->name},
           {"enabled", wlrOutput->enabled},
@@ -1000,6 +1174,12 @@ namespace umbriel {
           {"primaries", description != nullptr ? primariesName(description->primaries) : "none"},
           {"sdr_white", output->sdrWhite()},
           {"sdr_transfer", output->configuredSdrTransfer() == SdrTransfer::Srgb ? "srgb" : "gamma22"},
+          {"color_profile", output->configuredColorProfile()},
+          {"color_profile_resolved", output->resolvedColorProfile()},
+          {"sdr_gamut", output->configuredSdrGamut() == SdrGamut::Srgb ? "srgb" : "native"},
+          // True while the characterized SDR gamut transform is staged on the
+          // frame path ("native" stages nothing, pixels stay pass-through).
+          {"sdr_gamut_staged", output->stagedSdrGamutTransform() != nullptr},
           {"bit_depth", output->configuredBitDepth()},
           {"bit_depth_active", output->bitDepthActive()},
           {"bit_depth_fallback_reason", output->bitDepthFallbackReason()},
@@ -1008,6 +1188,18 @@ namespace umbriel {
           {"max_cll", description != nullptr ? description->max_cll : 0.0},
           {"max_fall", description != nullptr ? description->max_fall : 0.0},
       };
+      // Derived panel characterization: null while inert.
+      entry["panel_primaries"] = nullptr;
+      entry["panel_transfer"] = nullptr;
+      if (panel != nullptr) {
+        entry["panel_primaries"] = {
+            {"red", xy(panel->primaries.red)},
+            {"green", xy(panel->primaries.green)},
+            {"blue", xy(panel->primaries.blue)},
+            {"white", xy(panel->primaries.white)},
+        };
+        entry["panel_transfer"] = panelTransferName(panel->transfer);
+      }
       entry["mastering_display_primaries"] = nullptr;
       entry["mastering_luminance"] = nullptr;
       if (description != nullptr) {
@@ -1036,26 +1228,27 @@ namespace umbriel {
         continue;
       }
       wlr_surface* surface = view->rootSurface();
-      const wlr_image_description_v1_data* description = server.surfaceTreeHdrDescription(surface);
+      const ColorDescription* description = server.surfaceTreeHdrDescription(surface);
       if (description == nullptr) {
         description = server.surfaceImageDescription(surface);
       }
+      const wlr_image_description_v1_data* data = description != nullptr ? &description->data : nullptr;
       nlohmann::json entry = {
           {"id", view->extForeignIdentifier() != nullptr ? view->extForeignIdentifier() : ""},
           {"app_id", view->appId() != nullptr ? view->appId() : ""},
           {"title", view->title() != nullptr ? view->title() : ""},
-          {"transfer_function", protocolTransferFunctionName(description != nullptr ? description->tf_named : 0)},
+          {"transfer_function", surfaceTransferLabel(description)},
           {"primaries",
-           description != nullptr && description->primaries_named == 0
+           data != nullptr && data->primaries_named == 0
                ? "custom"
-               : protocolPrimariesName(description != nullptr ? description->primaries_named : 0)},
-          {"max_cll", description != nullptr ? description->max_cll : 0},
-          {"max_fall", description != nullptr ? description->max_fall : 0},
+               : protocolPrimariesName(data != nullptr ? data->primaries_named : 0)},
+          {"max_cll", data != nullptr ? data->max_cll : 0},
+          {"max_fall", data != nullptr ? data->max_fall : 0},
       };
       entry["mastering_display_primaries"] = nullptr;
       entry["mastering_luminance"] = nullptr;
-      if (description != nullptr && description->has_mastering_display_primaries) {
-        const auto& primaries = description->mastering_display_primaries;
+      if (data != nullptr && data->has_mastering_display_primaries) {
+        const auto& primaries = data->mastering_display_primaries;
         entry["mastering_display_primaries"] = {
             {"red", xy(primaries.red)},
             {"green", xy(primaries.green)},
@@ -1063,10 +1256,10 @@ namespace umbriel {
             {"white", xy(primaries.white)},
         };
       }
-      if (description != nullptr && description->has_mastering_luminance) {
+      if (data != nullptr && data->has_mastering_luminance) {
         entry["mastering_luminance"] = {
-            {"min", description->mastering_luminance.min},
-            {"max", description->mastering_luminance.max},
+            {"min", data->mastering_luminance.min},
+            {"max", data->mastering_luminance.max},
         };
       }
       surfaces.push_back(std::move(entry));
@@ -1214,6 +1407,89 @@ namespace umbriel {
       return nlohmann::json{{"err", errors.empty() ? "config replace failed" : errors}};
     }
 
+    server.handleConfigReload(result);
+    return nlohmann::json{{"ok", nullptr}};
+  }
+
+  nlohmann::json IpcCommands::configSet(Server& server, IpcArgs args) {
+    if (args.size() < 2) {
+      return nlohmann::json{{"err", "usage: config set <key> <value>"}};
+    }
+    std::string error;
+    const auto key = configoverrides::parseKey(args.front(), error);
+    if (!key) {
+      return nlohmann::json{{"err", error}};
+    }
+    if (key->front() == "include") {
+      return nlohmann::json{{"err", "include cannot be set at runtime"}};
+    }
+    // A value the shell split into several words, such as `[1, 2]`, is one value again.
+    std::string value;
+    for (const std::string& word : args.subspan(1)) {
+      if (!value.empty()) {
+        value += ' ';
+      }
+      value += word;
+    }
+    const auto delta = configoverrides::assignment(*key, value, error);
+    if (!delta) {
+      return nlohmann::json{{"err", error}};
+    }
+    toml::table overrides = configStore().overrides();
+    configoverrides::overlay(overrides, *delta);
+    const ConfigReloadResult result = configStore().applyOverrides(std::move(overrides), true, error);
+    if (!result.success) {
+      return nlohmann::json{{"err", error}};
+    }
+    server.handleConfigReload(result);
+    return nlohmann::json{{"ok", nullptr}};
+  }
+
+  nlohmann::json IpcCommands::configGet(Server& /*server*/, IpcArgs args) {
+    if (args.size() != 1) {
+      return nlohmann::json{{"err", "usage: config get <key>"}};
+    }
+    std::string error;
+    const auto key = configoverrides::parseKey(args.front(), error);
+    if (!key) {
+      return nlohmann::json{{"err", error}};
+    }
+    const ConfigStore& store = configStore();
+    const nlohmann::json document = configoverrides::activeDocument(store.effective(), store.config());
+    const nlohmann::json* value = configoverrides::find(document, *key);
+    if (value == nullptr) {
+      return nlohmann::json{{"err", std::format("unknown config key: {}", args.front())}};
+    }
+    return nlohmann::json{
+        {"ok", {{"value", *value}, {"override", configoverrides::contains(store.overrides(), *key)}}}
+    };
+  }
+
+  nlohmann::json IpcCommands::configUnset(Server& server, IpcArgs args) {
+    if (args.size() != 1) {
+      return nlohmann::json{{"err", "usage: config unset <key|--all>"}};
+    }
+    std::string error;
+    toml::table overrides;
+    if (args.front() == "--all") {
+      if (configStore().overrides().empty()) {
+        return nlohmann::json{{"ok", nullptr}};
+      }
+    } else {
+      const auto key = configoverrides::parseKey(args.front(), error);
+      if (!key) {
+        return nlohmann::json{{"err", error}};
+      }
+      overrides = configStore().overrides();
+      if (!configoverrides::remove(overrides, *key)) {
+        return nlohmann::json{{"err", std::format("no runtime override at {}", args.front())}};
+      }
+    }
+    // Dropping an override can uncover a file value whose warning it hid; that is no reason to keep the override.
+    const ConfigReloadResult result = configStore().applyOverrides(std::move(overrides), false, error);
+    if (!result.success) {
+      return nlohmann::json{{"err", error}};
+    }
     server.handleConfigReload(result);
     return nlohmann::json{{"ok", nullptr}};
   }
@@ -1391,6 +1667,10 @@ namespace umbriel {
   }
 
   static constexpr IpcCommandSpec kIpcCommands[] = {
+      {"global-shortcuts", "", "inspect live and remembered application shortcuts", IpcCommandGroup::Inspect, false,
+       &IpcCommands::globalShortcuts, &printGlobalShortcuts},
+      {"global-shortcuts-revoke", "<application|all>", "forget shortcut approval and close matching live sessions",
+       IpcCommandGroup::Control, true, &IpcCommands::globalShortcutsRevoke, nullptr},
       {"input-capture-permissions", "", "list remembered input capture grants", IpcCommandGroup::Inspect, false,
        &IpcCommands::inputCapturePermissions, nullptr},
       {"input-capture-revoke", "<id|all>", "forget capture permission and stop sessions using it",
@@ -1401,6 +1681,12 @@ namespace umbriel {
        &IpcCommands::outputDestroy, nullptr},
       {"config-replace", "<path>", "load and watch a different config file", IpcCommandGroup::Control, true,
        &IpcCommands::configReplace, nullptr},
+      {"config-set", "<key> <value>", "override a config value until the compositor exits", IpcCommandGroup::Config,
+       true, &IpcCommands::configSet, nullptr},
+      {"config-get", "<key>", "print the active value of a config key", IpcCommandGroup::Config, true,
+       &IpcCommands::configGet, &printConfigValue},
+      {"config-unset", "<key|--all>", "drop runtime overrides so the file or default applies again",
+       IpcCommandGroup::Config, true, &IpcCommands::configUnset, nullptr},
       {"effects", "", "inspect effect presets, pools, and owner selections", IpcCommandGroup::Inspect, false,
        &IpcCommands::effects, &printEffects},
       {"windows", "", "list windows (app id and title)", IpcCommandGroup::Inspect, false, &IpcCommands::windows,
@@ -1456,6 +1742,14 @@ namespace umbriel {
       }
     }
     return nullptr;
+  }
+
+  std::string cliName(const IpcCommandSpec& spec) {
+    constexpr std::string_view kConfigPrefix = "config-";
+    if (spec.group == IpcCommandGroup::Config && spec.name.starts_with(kConfigPrefix)) {
+      return std::format("config {}", spec.name.substr(kConfigPrefix.size()));
+    }
+    return std::string(spec.name);
   }
 
 } // namespace umbriel

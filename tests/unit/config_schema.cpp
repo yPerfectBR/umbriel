@@ -185,6 +185,7 @@ UMBRIEL_TEST(jsonIsSortedAndTyped) {
   std::string previous;
   bool sawUnsetKey = false;
   bool sawReleaseKey = false;
+  bool sawGlobalShortcut = false;
   for (const auto& option : json["options"]) {
     const std::string path = option["path"];
     if (!(previous < path)) {
@@ -206,9 +207,16 @@ UMBRIEL_TEST(jsonIsSortedAndTyped) {
       CHECK(option["format"] == "action");
       CHECK(!option.contains("default"));
     }
+    if (path == "global_shortcuts.<name>.<name>") {
+      sawGlobalShortcut = true;
+      CHECK(option["type"] == "string");
+      CHECK(option["format"] == "chord");
+      CHECK(!option.contains("default"));
+    }
   }
   CHECK(sawUnsetKey);
   CHECK(sawReleaseKey);
+  CHECK(sawGlobalShortcut);
 }
 
 // Every value a key lists is one its reader accepts without complaint.
@@ -257,6 +265,34 @@ UMBRIEL_TEST(outputSdrTransferSchemaListsCanonicalValuesAndDefault) {
       CHECK_EQ(key.type, std::string_view{"enum"});
       CHECK(key.values == std::vector<std::string_view>({"gamma22", "srgb"}));
       CHECK(key.defaultValue == "gamma22");
+    }
+  }
+  CHECK(found);
+}
+
+UMBRIEL_TEST(outputColorProfileSchemaListsBuiltinSourcesAndDefault) {
+  const auto descriptions = umbriel::registry::describeConfig(umbriel::Config{});
+  bool found = false;
+  for (const auto& key : descriptions) {
+    if (key.path == "output.<name>.color_profile") {
+      found = true;
+      CHECK_EQ(key.type, std::string_view{"string"});
+      CHECK(key.values == std::vector<std::string_view>({"none", "edid"}));
+      CHECK(key.defaultValue == "none");
+    }
+  }
+  CHECK(found);
+}
+
+UMBRIEL_TEST(outputSdrGamutSchemaListsCanonicalValuesAndDefault) {
+  const auto descriptions = umbriel::registry::describeConfig(umbriel::Config{});
+  bool found = false;
+  for (const auto& key : descriptions) {
+    if (key.path == "output.<name>.sdr_gamut") {
+      found = true;
+      CHECK_EQ(key.type, std::string_view{"enum"});
+      CHECK(key.values == std::vector<std::string_view>({"srgb", "native"}));
+      CHECK(key.defaultValue == "native");
     }
   }
   CHECK(found);

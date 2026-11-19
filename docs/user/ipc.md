@@ -14,17 +14,19 @@ Replies use `{"ok": ...}` or `{"err": "..."}`. Commands that take arguments send
 
 ## Queries
 
-| Request                                          | CLI                                        |
-| ------------------------------------------------ | ------------------------------------------ |
-| `{"cmd":"effects"}`                              | `umbriel effects --json`                   |
-| `{"cmd":"windows"}`                              | `umbriel windows --json`                   |
-| `{"cmd":"focused-window"}`                       | `umbriel focused-window --json`            |
-| `{"cmd":"workspaces"}`                           | `umbriel workspaces --json`                |
-| `{"cmd":"submap"}`                               | `umbriel submap --json`                    |
-| `{"cmd":"layers"}`                               | `umbriel layers --json`                    |
-| `{"cmd":"outputs"}`                              | `umbriel outputs --json`                   |
-| `{"cmd":"input-capture-permissions"}`            | `umbriel input-capture-permissions --json` |
-| `{"cmd":"input-capture-revoke","args":["<id>"]}` | `umbriel input-capture-revoke <id>`        |
+| Request                                                      | CLI                                             |
+| ------------------------------------------------------------ | ----------------------------------------------- |
+| `{"cmd":"effects"}`                                          | `umbriel effects --json`                        |
+| `{"cmd":"windows"}`                                          | `umbriel windows --json`                        |
+| `{"cmd":"focused-window"}`                                   | `umbriel focused-window --json`                 |
+| `{"cmd":"workspaces"}`                                       | `umbriel workspaces --json`                     |
+| `{"cmd":"submap"}`                                           | `umbriel submap --json`                         |
+| `{"cmd":"layers"}`                                           | `umbriel layers --json`                         |
+| `{"cmd":"outputs"}`                                          | `umbriel outputs --json`                        |
+| `{"cmd":"input-capture-permissions"}`                        | `umbriel input-capture-permissions --json`      |
+| `{"cmd":"input-capture-revoke","args":["<id>"]}`             | `umbriel input-capture-revoke <id>`             |
+| `{"cmd":"global-shortcuts"}`                                 | `umbriel global-shortcuts --json`               |
+| `{"cmd":"global-shortcuts-revoke","args":["<application>"]}` | `umbriel global-shortcuts-revoke <application>` |
 
 ## Actions
 
@@ -94,6 +96,8 @@ Window state follows what Umbriel has decided, ahead of the client's redraw, the
 
 Workspace entries include a stable ID, display name, index, output, layout, occupancy, and active and focused states. The `layout` field is `"scrolling"`, `"dwindle"`, `"master"`, or `"stacking"`. Use the `named` boolean instead of guessing from the display name; an explicitly named workspace may still be called `"2"`. `window_count` counts its mapped windows. Pinned windows belong to the output, so neither `occupied` nor `window_count` includes them. `focused_window` is the ID of the window it last focused (`""` when none), `urgent` is set while any of its windows is urgent, and `layout_override` is set while a runtime `workspace-set-layout` replaces the configured layout.
 
+The `previous` boolean marks the previous active workspace on each output, using the same history as `back_and_forth`. It is false for every workspace on an output before its first switch or after its previous workspace is removed. This field is also included in `workspaces` event snapshots.
+
 Layer entries describe layer-shell surfaces such as panels, launchers, and wallpapers: `layer`, `namespace`, `output`, `mapped`, `pid`, `keyboard_interactivity` (`none`, `exclusive`, or `on_demand`), `focused` while the surface holds the keyboard, `exclusive_zone`, `anchor` (the anchored edges), `margin`, and the arranged geometry `x`, `y`, `w`, and `h` in layout coordinates.
 
 Output entries list every connected output, including disabled ones: `name`, `description`, `make`, `model`, `serial`, `config_name` (the [monitor identity](outputs.md), or `null` when the display reports none), `physical_size`, `enabled` (part of the desktop), `powered` (enabled and not switched off by DPMS), `focused`, `active_workspace` (its ID), `position`, `logical_size`, `usable_area` (the part layer-shell exclusive zones leave, in layout coordinates), `transform`, `scale`, `adaptive_sync` (`null` when the output cannot use variable refresh), `hdr_active`, `direct_scanout`, and `modes`, each with `width`, `height`, `refresh_mhz`, `preferred`, and `current`. A disabled output reports a zero `logical_size` and `usable_area`.
@@ -127,6 +131,28 @@ Inspection never picks, compiles, or binds an effect. Use `effects`, not `output
 `input-capture-permissions` lists remembered grants with `id`, `application`, `capabilities`, and `persist_mode`. Application identifiers can be empty and are not verified display names. The reply never contains restore credentials.
 
 `input-capture-revoke <id>` forgets a grant and stops its live capture sessions. `input-capture-revoke all` forgets every grant. Revoking an already forgotten valid ID succeeds. A state-write error is reported even though matching live capture sessions are stopped. See [Input capture](security.md#input-capture) for approval lifetimes and the state file location.
+
+## Global shortcuts
+
+`global-shortcuts` lists live and remembered shortcuts, grouped by exact `application` ID. Each application has `live` (whether it has an open bridge session) and `shortcuts`. Without `--json`, the command prints a readable listing with quoted requester text. Inspection does not register shortcuts, restore credentials, or change ownership.
+
+Each shortcut has:
+
+| Field               | Meaning                                                                                                               |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `id`, `description` | Requester-supplied shortcut ID and description. Application labels are unverified.                                    |
+| `session`           | Live bridge session number, or `null` for remembered scope without a current registration.                            |
+| `pending`           | The live registration is awaiting physical approval.                                                                  |
+| `trigger`           | Assigned chord, or `null`. This describes assignment, including while activation is suppressed by capture or locking. |
+| `candidate`         | Resolved chord before conflicts, or `null`. Remembered entries have candidates but no assigned trigger.               |
+| `source`            | `config`, `stored`, `preferred`, or `none`.                                                                           |
+| `conflict`          | `none`, `unassigned`, `disabled`, `reserved`, or `in_use`.                                                            |
+
+Multiple live sessions or remembered grants can contain the same shortcut ID. Session numbers distinguish live registrations; remembered scope remains visible for IDs not registered in any live session using that grant. Offline candidates do not reserve keys. An unreadable or locked state store returns an error instead of an incomplete listing. Credentials are never included.
+
+`global-shortcuts-revoke <application>` forgets every grant for that exact application ID, deactivates its held shortcuts, and closes its live sessions, including pending review. `global-shortcuts-revoke all` does this for every application. Already forgotten valid application IDs succeed. If durable deletion fails, matching live sessions still close and the command reports an error; credentials may remain usable until deletion succeeds. Successful revocation invalidates stale restore credentials. Configuration overrides remain in the config file, and new sessions need fresh approval.
+
+See [Global shortcuts](configuration.md#global-shortcuts) for chord overrides and [Global shortcut approval](security.md#global-shortcut-approval) for permission handling.
 
 ## Event stream
 
@@ -266,7 +292,9 @@ Disconnect, malformed or oversized input, or 250 ms without a snapshot closes th
 
 `umbriel config validate` checks a configuration and `umbriel config schema` lists the keys it accepts, both without a running compositor.
 
-`umbriel config-replace <path>` loads and watches a different configuration file in the running compositor. The path must be absolute. On success, the new file and its includes replace the previous watch set, and later reloads use the new file. A missing, unreadable, or invalid file returns an error and leaves the active configuration and watch set unchanged. Warnings do not reject a replacement.
+`umbriel config-replace <path>` loads and watches a different configuration file in the running compositor. The path must be absolute. On success, the new file and its includes replace the previous watch set, and later reloads use the new file. A missing, unreadable, or invalid file returns an error and leaves the active configuration and watch set unchanged. Warnings do not reject a replacement. [Runtime overrides](configuration.md#runtime-overrides) stay applied over the new file.
+
+`umbriel config set`, `config get`, and `config unset` manage [runtime overrides](configuration.md#runtime-overrides). Their requests are `{"cmd":"config-set","args":["<key>","<value>"]}`, `{"cmd":"config-get","args":["<key>"]}`, and `{"cmd":"config-unset","args":["<key>"]}` (or `["--all"]`).
 
 ## Virtual outputs
 

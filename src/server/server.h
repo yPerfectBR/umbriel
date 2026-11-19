@@ -9,6 +9,7 @@
 #include "input/pending_releases.h"
 #include "input/shortcuts_inhibit.h"
 #include "input/surface_layouts.h"
+#include "output/connector_hdr_state.h"
 #include "output/enable_overrides.h"
 #include "scene/border_rect.h"
 #include "scene/effect_registry.h"
@@ -129,10 +130,12 @@ namespace umbriel {
 
   enum class WheelDirection;
   struct Keybind;
+  struct GlobalShortcutBind;
 
   class Cursor;
   class EisInput;
   class InputCapture;
+  class GlobalShortcuts;
   class BackendManager;
   class DrmLeaseManager;
   class FocusManager;
@@ -141,6 +144,7 @@ namespace umbriel {
   class InputMethodRelay;
   class Gestures;
   class ColorManager;
+  struct ColorDescription;
   class SyncobjAcquireBarrier;
   class SyncobjSupersededRelease;
   class SyncobjUnmapRelease;
@@ -185,6 +189,7 @@ namespace umbriel {
     Xwayland* xwayland() const { return m_xwayland.get(); }
     EisInput* eisInput() const { return m_eisInput.get(); }
     InputCapture* inputCapture() const { return m_inputCapture.get(); }
+    GlobalShortcuts* globalShortcuts() const { return m_globalShortcuts.get(); }
     bool physicalInputDevice(const wlr_input_device* device) const;
     bool keyboardKeyConsumed(wlr_keyboard* keyboard, uint32_t keycode) const;
     wlr_backend* backend() const { return m_backend; }
@@ -202,8 +207,8 @@ namespace umbriel {
     bool outputCaptured(const wlr_output* output) const;
     wlr_tearing_control_manager_v1* tearingControlManager() const { return m_tearingControlManager; }
     ColorManager* colorManager() const { return m_colorManager.get(); }
-    const wlr_image_description_v1_data* surfaceImageDescription(wlr_surface* surface) const;
-    const wlr_image_description_v1_data* surfaceTreeHdrDescription(wlr_surface* surface) const;
+    const ColorDescription* surfaceImageDescription(wlr_surface* surface) const;
+    const ColorDescription* surfaceTreeHdrDescription(wlr_surface* surface) const;
     void updateColorPreferences();
     wlr_scene_tree* xdgTree() const { return m_xdgTree; }
     wlr_scene_tree* scratchpadTree() const { return m_scratchpadTree; }
@@ -291,6 +296,8 @@ namespace umbriel {
     void confirmScreenCastDynamic();
     void confirmInputEmulation();
     void confirmInputCapture(bool remember = false);
+    void confirmGlobalShortcuts();
+    void failGlobalShortcuts();
     void dismissConfirmation();
     // Owners register themselves for the frame tick. The registry is kept in phase order, so the three traversals above
     // never re-state which owners exist or in what order they run.
@@ -300,6 +307,7 @@ namespace umbriel {
     void hideInsertHint();
     uint64_t uptimeMs() const;
     SessionLock* sessionLock() const { return m_sessionLock.get(); }
+    ConnectorHdrState& connectorHdrState() { return m_connectorHdrState; }
     bool sessionLocked() const { return m_sessionLocked; }
     const std::string& activeSubmap() const {
       static const std::string empty;
@@ -547,6 +555,8 @@ namespace umbriel {
     void requestInputCapture(uint64_t id, std::string_view name, uint32_t persistMode);
     void cancelInputCapture(uint64_t id);
     void inputCaptureStateChanged(bool active);
+    void requestGlobalShortcuts(uint64_t id, std::string_view application, const GlobalShortcutBind& bind);
+    void cancelGlobalShortcuts(uint64_t id);
     static void onSessionActive(wl_listener* listener, void* data);
     void updateDrmLeaseState();
     friend class Output;
@@ -960,6 +970,8 @@ namespace umbriel {
     std::unique_ptr<Xwayland> m_xwayland;
     std::unique_ptr<EisInput> m_eisInput;
     std::unique_ptr<InputCapture> m_inputCapture;
+    std::unique_ptr<GlobalShortcuts> m_globalShortcuts;
+    uint64_t m_pendingGlobalShortcutsId = 0;
     uint64_t m_pendingCaptureId = 0;
     uint32_t m_inputCaptureCapabilities = 0;
     uint64_t m_pendingInputId = 0;
@@ -1051,6 +1063,7 @@ namespace umbriel {
     // different identified monitors. An output-policy config reload clears
     // them.
     OutputEnableOverrides m_outputEnableOverrides;
+    ConnectorHdrState m_connectorHdrState;
     Dirty m_dirty = Dirty::None;
     ViewRegistry m_registry;
     FocusManager m_focus{*this};
